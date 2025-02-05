@@ -1,16 +1,16 @@
-use std::{fs::{self, File}, io::Read};
+use std::{fs::File, io::Read};
 
-use actix_web::{HttpResponse, get, web};
+use crate::{
+    controllers::jwt::exchange_token_for_user,
+    db::{
+        operations_game2v2::get_game_by_id, operations_teams::get_team_by_student_for_competition,
+    },
+    models::user::Role,
+};
+use actix_web::{get, web, HttpResponse};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use serde::Serialize;
 use zip::ZipArchive;
-use crate::{
-    db::{
-        operations_game2v2::get_game_by_id, 
-        operations_teams::get_team_by_student_for_competition
-    }, 
-    controllers::jwt::exchange_token_for_user, models::user::Role
-};
 
 #[derive(Debug, Serialize)]
 struct GameLogResponse {
@@ -21,10 +21,8 @@ struct GameLogResponse {
 pub async fn game_log(auth: Option<BearerAuth>, id: web::Path<String>) -> HttpResponse {
     let game = match get_game_by_id(id.clone()) {
         Ok(game) => game,
-        Err(_) => return HttpResponse::NotFound().finish()
+        Err(_) => return HttpResponse::NotFound().finish(),
     };
-
-    
 
     if !game.public {
         let auth_token = match auth {
@@ -38,7 +36,10 @@ pub async fn game_log(auth: Option<BearerAuth>, id: web::Path<String>) -> HttpRe
         };
 
         if requesting_user.role != Role::Admin {
-            let team = match get_team_by_student_for_competition(requesting_user, game.competition_id.clone()) {
+            let team = match get_team_by_student_for_competition(
+                requesting_user,
+                game.competition_id.clone(),
+            ) {
                 Ok(t) => t,
                 Err(_) => return HttpResponse::Unauthorized().finish(),
             };
@@ -50,7 +51,6 @@ pub async fn game_log(auth: Option<BearerAuth>, id: web::Path<String>) -> HttpRe
 
     let log_file_path = game.log_file_path;
 
-        
     // Open the ZIP file
     let file = match File::open(&log_file_path) {
         Ok(file) => file,
@@ -79,5 +79,4 @@ pub async fn game_log(auth: Option<BearerAuth>, id: web::Path<String>) -> HttpRe
     HttpResponse::Ok()
         .content_type("application/text; charset=utf-8")
         .body(log_file_contents)
-
 }

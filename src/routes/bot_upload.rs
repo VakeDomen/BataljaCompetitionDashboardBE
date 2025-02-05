@@ -1,8 +1,5 @@
 use crate::{
-    controllers::{
-        jwt::exchange_token_for_user,
-        matchmakers::classic2v2::{compile_bot, compile_team_bots},
-    },
+    controllers::{jwt::exchange_token_for_user, matchmakers::classic2v2::compile_bot},
     db::{
         operations_bot::{get_bot_by_id, insert_bot, set_bot_error},
         operations_teams::{get_team_by_id, set_team_bot},
