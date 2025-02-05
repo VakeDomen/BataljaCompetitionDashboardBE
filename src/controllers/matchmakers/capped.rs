@@ -5,10 +5,9 @@ use crate::{
     },
     db::{
         operations_competition::{get_competition_by_id, set_competition_round},
-        operations_teams::{get_team_by_id, get_teams_by_competition_id},
-        schema::competitions::games_per_round,
+        operations_teams::get_teams_by_competition_id,
     },
-    models::errors::MatchMakerError,
+    models::{competition::Competition, errors::MatchMakerError, game_2v2::Game2v2, team::Team},
 };
 
 pub fn run_round(competition_id: String) -> Result<(), MatchMakerError> {
@@ -27,14 +26,16 @@ pub fn run_round(competition_id: String) -> Result<(), MatchMakerError> {
     let compiled_teams = compile_team_bots(teams);
     let match_pairs = random::create_match_pairs(competition.games_per_round, compiled_teams);
 
+    let mut games_vec = Vec::new();
+
     for (team1, team2) in match_pairs {
         match run_match(&competition, &team1, &team2) {
-            Ok(g) => {}
+            Ok(g) => games_vec.push(g),
             Err(e) => eprintln!("Error: {}", e),
         }
     }
 
-    if let Err(e) = update_team_elo(match_pairs) {
+    if let Err(e) = update_team_elo(games_vec) {
         return Err(MatchMakerError::DatabaseError(e));
     }
 
@@ -47,4 +48,15 @@ pub fn run_round(competition_id: String) -> Result<(), MatchMakerError> {
 
     println!("Competition done!");
     Ok(())
+}
+
+/// Runs a match between two teams in a given competition
+///
+/// Runs similar to classic2v2::run_match
+fn run_match(
+    competition: &Competition,
+    team1: &Team,
+    team2: &Team,
+) -> Result<Game2v2, MatchMakerError> {
+    Ok(Game2v2::default())
 }
