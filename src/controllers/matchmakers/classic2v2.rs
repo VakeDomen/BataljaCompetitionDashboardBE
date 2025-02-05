@@ -31,7 +31,7 @@ use crate::{
     },
 };
 
-use super::{
+use crate::controllers::{
     command_executor::{execute_command, recursive_copy},
     elo::calc_elo_changes,
     file_handler::save_to_zip,
@@ -74,7 +74,7 @@ pub fn run_round(competition_id: String) -> Result<(), MatchMakerError> {
         Err(e) => return Err(MatchMakerError::DatabaseError(e)),
     };
 
-    let teams = match get_teams_by_competition_id(competition.id.clone()) {
+    let teams = match get_teams_by_competition_id(&competition.id) {
         Ok(teams) => teams,
         Err(e) => return Err(MatchMakerError::DatabaseError(e)),
     };
