@@ -1,5 +1,4 @@
 use num_cpus;
-use rand::Rng;
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::{
     collections::HashMap,
@@ -135,7 +134,7 @@ pub fn run_round(competition_id: String) -> Result<(), MatchMakerError> {
 }
 
 /// Kill all processes running with the command "java Player."
-fn kill_java_player_processes() -> Result<(), std::io::Error> {
+pub fn kill_java_player_processes() -> Result<(), std::io::Error> {
     // Get a list of all processes with "java Player" in their command line
     let ps_output = Command::new("ps").arg("ax").output()?;
 
