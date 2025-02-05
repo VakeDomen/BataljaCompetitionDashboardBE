@@ -126,7 +126,7 @@ pub fn run_round(competition_id: String) -> Result<(), MatchMakerError> {
 
     // increment competition round
     let new_round = competition.round + 1;
-    if let Err(e) = set_competition_round(competition.id.clone(), new_round) {
+    if let Err(e) = set_competition_round(&competition.id, new_round) {
         return Err(MatchMakerError::DatabaseError(e));
     }
     println!("Competition done!");
