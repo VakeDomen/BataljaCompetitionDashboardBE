@@ -1,13 +1,13 @@
 use std::{fs::File, io::Read};
 
-use actix_web::{HttpResponse, get, web};
 use crate::db::operations_competition::get_competition_by_id;
+use actix_web::{get, web, HttpResponse};
 
 #[get("/competition/pack/{comp_id}")]
 pub async fn competition_pack(comp_id: web::Path<String>) -> HttpResponse {
     let competition = match get_competition_by_id(comp_id.into_inner()) {
-        Ok(competition) =>competition,
-        Err(e) => return HttpResponse::NotFound().finish(),
+        Ok(competition) => competition,
+        Err(_e) => return HttpResponse::NotFound().finish(),
     };
 
     let path = competition.game_pack;
@@ -28,6 +28,9 @@ pub async fn competition_pack(comp_id: web::Path<String>) -> HttpResponse {
     // Return the response
     HttpResponse::Ok()
         .content_type("application/zip")
-        .header("Content-Disposition", format!("attachment; filename=\"{}\"", filename))
+        .append_header((
+            "Content-Disposition",
+            format!("attachment; filename=\"{}\"", filename),
+        ))
         .body(buffer)
 }
