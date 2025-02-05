@@ -14,7 +14,11 @@ use std::{
 use wait_timeout::ChildExt;
 
 use crate::{
-    controllers::elo::update_team_elo,
+    controllers::{
+        command_executor::{execute_command, recursive_copy},
+        elo::{calc_elo_changes, update_team_elo},
+        file_handler::save_to_zip,
+    },
     db::{
         operations_bot::{get_bot_by_id, set_bot_error},
         operations_competition::{get_competition_by_id, set_competition_round},
@@ -24,17 +28,11 @@ use crate::{
     models::{
         bot::Bot,
         competition::Competition,
-        errors::{self, MatchMakerError},
-        game_2v2::{self, Game2v2, NewGame2v2},
+        errors::MatchMakerError,
+        game_2v2::{Game2v2, NewGame2v2},
         game_player_stats::{GameError, GamePlayerStats},
         team::Team,
     },
-};
-
-use crate::controllers::{
-    command_executor::{execute_command, recursive_copy},
-    elo::calc_elo_changes,
-    file_handler::save_to_zip,
 };
 
 /// Runs a 2v2 round for a specified competition.
