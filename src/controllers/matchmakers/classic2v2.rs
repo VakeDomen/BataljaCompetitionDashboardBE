@@ -1,25 +1,41 @@
-use std::{path::Path, fs::{self, File}, process::{Command, Stdio, ExitStatus, Output}, time::Duration, thread, io::{BufReader, BufRead, self}, collections::HashMap, sync::{Arc, Mutex}};
-use rand::Rng;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator, IntoParallelRefIterator};
-use wait_timeout::ChildExt;
 use num_cpus;
+use rand::Rng;
+use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{self, BufRead, BufReader},
+    path::Path,
+    process::{Command, ExitStatus, Output, Stdio},
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
+use wait_timeout::ChildExt;
 
 use crate::{
+    controllers::elo::update_team_elo,
     db::{
-        operations_competition::{get_competition_by_id, set_competition_round}, 
-        operations_teams::get_teams_by_competition_id, 
-        operations_bot::{get_bot_by_id, set_bot_error}, operations_game2v2::insert_game,
-    }, 
+        operations_bot::{get_bot_by_id, set_bot_error},
+        operations_competition::{get_competition_by_id, set_competition_round},
+        operations_game2v2::insert_game,
+        operations_teams::get_teams_by_competition_id,
+    },
     models::{
-        team::Team, 
-        errors::{MatchMakerError, self}, 
-        bot::Bot, 
-        game_2v2::{NewGame2v2, Game2v2, self}, 
-        competition::Competition, game_player_stats::{GamePlayerStats, GameError}
-    }, controllers::elo::update_team_elo
+        bot::Bot,
+        competition::Competition,
+        errors::{self, MatchMakerError},
+        game_2v2::{self, Game2v2, NewGame2v2},
+        game_player_stats::{GameError, GamePlayerStats},
+        team::Team,
+    },
 };
 
-use super::{command_executor::{execute_command, recursive_copy}, elo::calc_elo_changes, file_handler::save_to_zip};
+use super::{
+    command_executor::{execute_command, recursive_copy},
+    elo::calc_elo_changes,
+    file_handler::save_to_zip,
+};
 
 /// Runs a 2v2 round for a specified competition.
 ///
@@ -38,7 +54,7 @@ use super::{command_executor::{execute_command, recursive_copy}, elo::calc_elo_c
 ///
 /// # Returns
 ///
-/// A `Result` containing a `Vec` of tuples, where each tuple contains two teams that played against each other in the round. 
+/// A `Result` containing a `Vec` of tuples, where each tuple contains two teams that played against each other in the round.
 /// If successful, or a `MatchMakerError` if there's an error.
 ///
 /// # Errors
@@ -51,22 +67,21 @@ use super::{command_executor::{execute_command, recursive_copy}, elo::calc_elo_c
 /// - The cleanup process fails.
 /// - There's a problem updating the competition's round in the database.
 ///
-pub fn run_2v2_round(competition_id: String) -> Result<(), MatchMakerError> {
+pub fn run_round(competition_id: String) -> Result<(), MatchMakerError> {
     println!("Running 2v2 competition: {}", competition_id);
     let competition = match get_competition_by_id(competition_id) {
         Ok(c) => c,
-        Err(e) => return Err(MatchMakerError::DatabaseError(e))
+        Err(e) => return Err(MatchMakerError::DatabaseError(e)),
     };
 
     let teams = match get_teams_by_competition_id(competition.id.clone()) {
         Ok(teams) => teams,
-        Err(e) => return Err(MatchMakerError::DatabaseError(e))
+        Err(e) => return Err(MatchMakerError::DatabaseError(e)),
     };
 
     let compiled_teams = compile_team_bots(teams);
     let match_pairs = create_match_pairs(competition.games_per_round, compiled_teams);
 
-    
     // Get the number of available logical cores
     let num_cores = num_cpus::get();
 
@@ -82,7 +97,6 @@ pub fn run_2v2_round(competition_id: String) -> Result<(), MatchMakerError> {
     // Create a thread-safe vector using Arc and Mutex
     let games: Arc<Mutex<Vec<Game2v2>>> = Arc::new(Mutex::new(Vec::new()));
 
-
     // Execute the parallel operation with the custom thread pool
     pool.install(|| {
         match_pairs.par_iter().for_each(|match_pair| {
@@ -90,46 +104,47 @@ pub fn run_2v2_round(competition_id: String) -> Result<(), MatchMakerError> {
                 Ok(g) => {
                     let mut games_lock = games.lock().unwrap();
                     games_lock.push(g)
-                },
+                }
                 Err(e) => eprintln!("Error: {}", e),
             }
         });
     });
-    
+
     // Attempt to take ownership of the Mutex
     let games_mutex = Arc::try_unwrap(games)
         .expect("Arc::try_unwrap failed, there are multiple owners of the Arc");
 
     // Lock the Mutex to access the vector
-    let games_vec = games_mutex.into_inner()
+    let games_vec = games_mutex
+        .into_inner()
         .expect("Mutex::into_inner failed, the mutex is poisoned");
 
     if let Err(e) = update_team_elo(games_vec) {
-        return Err(MatchMakerError::DatabaseError(e.into()))
-    }; 
-    
+        return Err(MatchMakerError::DatabaseError(e.into()));
+    };
+
     // Cleanup: Remove the match directory
     cleanup_matches()?;
-    
+
     // increment competition round
     let new_round = competition.round + 1;
     if let Err(e) = set_competition_round(competition.id.clone(), new_round) {
-        return Err(MatchMakerError::DatabaseError(e))
-    }  
+        return Err(MatchMakerError::DatabaseError(e));
+    }
     println!("Competition done!");
     Ok(())
 }
 
 /// Cleans up the matches directory by removing all sub-directories.
 ///
-/// This function is designed to remove all game-related folders that were 
+/// This function is designed to remove all game-related folders that were
 /// created during individual matches within the `./resources/matches/` directory.
 /// It ensures the top-level `matches` directory remains intact while all its
 /// sub-directories (representing individual matches) are deleted.
 ///
 /// # Returns
 ///
-/// A `Result` which is `Ok(())` if the cleanup was successful, or a `MatchMakerError` 
+/// A `Result` which is `Ok(())` if the cleanup was successful, or a `MatchMakerError`
 /// if there's an error during the cleanup process.
 ///
 fn cleanup_matches() -> Result<(), MatchMakerError> {
@@ -153,13 +168,10 @@ fn cleanup_matches() -> Result<(), MatchMakerError> {
     Ok(())
 }
 
-
 /// Kill all processes running with the command "java Player."
 fn kill_java_player_processes() -> Result<(), std::io::Error> {
     // Get a list of all processes with "java Player" in their command line
-    let ps_output = Command::new("ps")
-        .arg("ax")
-        .output()?;
+    let ps_output = Command::new("ps").arg("ax").output()?;
 
     // Convert the output to a string
     let ps_output_str = String::from_utf8_lossy(&ps_output.stdout);
@@ -188,9 +200,17 @@ fn kill_java_player_processes() -> Result<(), std::io::Error> {
                         stderr,
                     }) => {
                         if status.success() {
-                            println!("Killed process with PID {}: {:?}", pid, String::from_utf8_lossy(&stdout));
+                            println!(
+                                "Killed process with PID {}: {:?}",
+                                pid,
+                                String::from_utf8_lossy(&stdout)
+                            );
                         } else {
-                            eprintln!("Failed to kill process with PID {}: {:?}", pid, String::from_utf8_lossy(&stderr));
+                            eprintln!(
+                                "Failed to kill process with PID {}: {:?}",
+                                pid,
+                                String::from_utf8_lossy(&stderr)
+                            );
                         }
                     }
                     Err(e) => {
@@ -204,7 +224,6 @@ fn kill_java_player_processes() -> Result<(), std::io::Error> {
     Ok(())
 }
 
-
 /// Runs a game match between two teams in a given competition.
 ///
 /// This function manages the preparation, execution, and cleanup of a game match between two teams.
@@ -213,7 +232,7 @@ fn kill_java_player_processes() -> Result<(), std::io::Error> {
 /// 1. Initializing a new 2v2 game instance based on the teams and competition details.
 /// 2. Creating a unique directory for the match within the `./resources/matches` folder.
 /// 3. Copying the bots of both teams to the match directory.
-/// 4. Running the game using the Evaluator JAR, ensuring the game and its spawned bot processes 
+/// 4. Running the game using the Evaluator JAR, ensuring the game and its spawned bot processes
 ///    are grouped together for easy management.
 /// 5. Saving the game's output to a file within the `./resources/games` folder.
 /// 6. Cleaning up by terminating any lingering processes related to the game to prevent zombies.
@@ -240,11 +259,15 @@ fn kill_java_player_processes() -> Result<(), std::io::Error> {
 /// - `MatchMakerError::GameProcessFailed` if the game process exits with an error.
 ///
 /// # Notes
-/// 
+///
 /// - This function assumes that the necessary external tools and JAR files for game evaluation are
 ///   available and correctly configured.
-/// 
-fn run_match(competition: &Competition, team1: &Team, team2: &Team) -> Result<Game2v2, MatchMakerError> {
+///
+fn run_match(
+    competition: &Competition,
+    team1: &Team,
+    team2: &Team,
+) -> Result<Game2v2, MatchMakerError> {
     // Initialize a new 2v2 game with details from the provided teams and competition
     let mut match_game = NewGame2v2::new(
         competition.id.clone(),
@@ -274,7 +297,7 @@ fn run_match(competition: &Competition, team1: &Team, team2: &Team) -> Result<Ga
     for bot_id in &bots {
         let source = Path::new("./resources/workdir/bots").join(bot_id);
         let destination = match_folder.join(bot_id);
-        
+
         if let Err(e) = recursive_copy(&source, &destination) {
             return Err(MatchMakerError::IOError(e));
         }
@@ -283,20 +306,27 @@ fn run_match(competition: &Competition, team1: &Team, team2: &Team) -> Result<Ga
     // Execute the game using the Evaluator JAR and collect the paths of each bot
     let mut bot_paths: Vec<String> = bots
         .iter()
-        .map(|bot_id| match_folder
-            .join(bot_id)
-            .to_string_lossy()
-            .to_string())
+        .enumerate()
+        .map(|(i, bot_id)| {
+            format!(
+                "-p_{} {}",
+                i,
+                match_folder.join(bot_id).to_string_lossy().to_string()
+            )
+        })
         .collect();
-    let output_file = format!("./resources/games/{}/{}.zip", competition.round, match_game.id.to_string());
+    let output_file = format!(
+        "./resources/games/{}/{}.zip",
+        competition.round,
+        match_game.id.to_string()
+    );
     let mut command_args = vec![
         "-jar".to_string(),
         "resources/gamefiles/Evaluator.jar".to_string(),
-        "--gui=false".to_string(),
+        "-o".to_string(), // run to stdout
     ];
     command_args.append(&mut bot_paths);
 
-    
     // Spawn the child process
     let mut child = Command::new("java")
         .args(&command_args)
@@ -328,7 +358,9 @@ fn run_match(competition: &Competition, team1: &Team, team2: &Team) -> Result<Ga
     });
 
     // Wait for the process to finish or timeout
-    let timeout_result: Option<ExitStatus> = child.wait_timeout(Duration::from_secs(120)).map_err(|e| MatchMakerError::IOError(e))?;
+    let timeout_result: Option<ExitStatus> = child
+        .wait_timeout(Duration::from_secs(120))
+        .map_err(|e| MatchMakerError::IOError(e))?;
     // Initialize flags for success and timeout
     // let mut timeout_occurred = false;
     // let mut success = true;
@@ -355,7 +387,6 @@ fn run_match(competition: &Competition, team1: &Team, team2: &Team) -> Result<Ga
     //     return Err(MatchMakerError::GameProcessFailed);
     // }
 
-
     // Save the game's output to the specified file
     let output_string = output.join("\n");
     if let Err(e) = save_to_zip(output_string, &output_file) {
@@ -367,14 +398,17 @@ fn run_match(competition: &Competition, team1: &Team, team2: &Team) -> Result<Ga
     // Save any errors to a separate file
     if !errors.concat().trim().eq("...") {
         let error_string = errors.join("\n");
-        let error_file = format!("./resources/games/{}/{}_error.txt", competition.round, match_game.id.to_string());
+        let error_file = format!(
+            "./resources/games/{}/{}_error.txt",
+            competition.round,
+            match_game.id.to_string()
+        );
         if let Err(e) = fs::write(&error_file, &error_string) {
             // Log error output to help diagnose problems
             log::error!("Error output from child process: {}", error_string);
             return Err(MatchMakerError::IOError(e));
         }
     }
-
 
     // Parse the game using the provided function and return the result
     parse_game(output, errors, match_game)
@@ -383,35 +417,39 @@ fn run_match(competition: &Competition, team1: &Team, team2: &Team) -> Result<Ga
 /// Parses game output to determine match results and constructs a `Game2v2` object.
 ///
 /// This function processes the output lines from a game match to extract relevant information
-/// such as which bots survived and the scores of each bot. Based on this information, it 
-/// determines the winner of the match and constructs a `Game2v2` object that encapsulates 
+/// such as which bots survived and the scores of each bot. Based on this information, it
+/// determines the winner of the match and constructs a `Game2v2` object that encapsulates
 /// these details.
 ///
-/// The function expects lines in the format `R <score> <color>` to determine scores of each bot. 
+/// The function expects lines in the format `R <score> <color>` to determine scores of each bot.
 /// Colors (`red`, `blue`, `green`, `yellow`) are associated with bots from both teams.
 ///
 /// # Arguments
 ///
 /// * `lines` - A vector of strings representing the game's output lines.
-/// * `match_game` - A mutable `NewGame2v2` object that contains initial game details and will be 
+/// * `match_game` - A mutable `NewGame2v2` object that contains initial game details and will be
 ///                  updated with the parsed results.
 ///
 /// # Returns
 ///
 /// A `Result` containing a `Game2v2` object if successful, or a `MatchMakerError` if there's an error.
 ///
-fn parse_game(lines: Vec<String>, errors: Vec<String>, mut match_game: NewGame2v2) -> Result<Game2v2, MatchMakerError> {
-    if errors.len() > 1 { // always at least 1 because of first "..." row
+fn parse_game(
+    lines: Vec<String>,
+    errors: Vec<String>,
+    mut match_game: NewGame2v2,
+) -> Result<Game2v2, MatchMakerError> {
+    if errors.len() > 1 {
+        // always at least 1 because of first "..." row
         parse_bugged_game(lines, errors, &mut match_game);
     } else {
         parse_healthy_game(lines, errors, &mut match_game);
     }
-    
 
     if let Err(e) = calc_elo_changes(&mut match_game) {
-        return Err(MatchMakerError::DatabaseError(e.into()))
+        return Err(MatchMakerError::DatabaseError(e.into()));
     }
-    
+
     match insert_game(match_game) {
         Ok(g) => Ok(g),
         Err(e) => Err(MatchMakerError::DatabaseError(e)),
@@ -462,17 +500,18 @@ fn parse_bugged_game(_lines: Vec<String>, errors: Vec<String>, match_game: &mut 
         }
     }
 
-    let trimmed_lines: String = errors
-        .join("\n")
-        .replace("\\", "\\\\");
+    let trimmed_lines: String = errors.join("\n").replace("\\", "\\\\");
 
     // Remove backslashes from the formatted string
     let additional_data_error = GameError {
         error: trimmed_lines,
-        blame_id: bugged_bot_id_option.unwrap_or(&"Unknown".to_string()).to_string()
+        blame_id: bugged_bot_id_option
+            .unwrap_or(&"Unknown".to_string())
+            .to_string(),
     };
 
-    match_game.additional_data = serde_json::to_string(&additional_data_error).unwrap_or(String::from("{ \"error\": \"Error serializing\"}"));
+    match_game.additional_data = serde_json::to_string(&additional_data_error)
+        .unwrap_or(String::from("{ \"error\": \"Error serializing\"}"));
 }
 
 fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut NewGame2v2) -> () {
@@ -483,14 +522,7 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
     let mut current_bot: Option<String> = None;
     let mut last_L: Option<String> = None;
     let mut stats: HashMap<String, GamePlayerStats> = HashMap::new();
-    let mut stats_keys = vec![
-        "team2bot2",
-        "team1bot2",
-        "team2bot1",
-        "team1bot1", 
-    ];
-
-
+    let mut stats_keys = vec!["team2bot2", "team1bot2", "team2bot1", "team1bot1"];
 
     for line in lines.into_iter() {
         // track score through the game
@@ -501,11 +533,11 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
             let parts: Vec<&str> = line.split(" ").collect();
             if parts.len() == 3 {
                 match parts[2] {
-                    "green"     => r_green = parts[1].parse().unwrap_or(0),
-                    "blue"      => r_blue = parts[1].parse().unwrap_or(0),
-                    "yellow"    => r_yellow = parts[1].parse().unwrap_or(0),
-                    "cyan"      => r_cyan = parts[1].parse().unwrap_or(0),
-                    _ => ()
+                    "green" => r_green = parts[1].parse().unwrap_or(0),
+                    "blue" => r_blue = parts[1].parse().unwrap_or(0),
+                    "yellow" => r_yellow = parts[1].parse().unwrap_or(0),
+                    "cyan" => r_cyan = parts[1].parse().unwrap_or(0),
+                    _ => (),
                 }
             }
         }
@@ -516,7 +548,7 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
 
         if line.contains("STAT: ") {
             // try to extract a bot name
-            // also init a stat object for the player (untill next player id there is going to 
+            // also init a stat object for the player (untill next player id there is going to
             // be a sequence of stats in form of <key>: <value> for this player)
             let next_key_option = stats_keys.pop();
             if let Some(next_key) = next_key_option {
@@ -525,36 +557,42 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
             }
         }
 
-
         let parts: Vec<&str> = line.split(" ").collect();
-        
+
         // if collecting player stats
         if let Some(bot_key) = &current_bot {
             if parts.len() == 2 {
-                
                 let stat = match stats.get_mut(bot_key) {
                     Some(s) => s,
                     None => continue,
                 };
-                
+
                 match parts[0] {
-                    "turnsPlayed:"           => stat.turns_played             = parts[1].parse().unwrap_or(0),
-                    "survive:"               => stat.survived                 = parts[1].parse().unwrap_or(false),
-                    "fleetGenerated:"        => stat.fleet_generated          = parts[1].parse().unwrap_or(0),
-                    "fleetLost:"             => stat.fleet_lost               = parts[1].parse().unwrap_or(0),
-                    "fleetReinforced:"       => stat.fleet_reinforced         = parts[1].parse().unwrap_or(0),
-                    "largestAttack:"         => stat.largest_attack           = parts[1].parse().unwrap_or(0),
-                    "largestLoss:"           => stat.largest_loss             = parts[1].parse().unwrap_or(0),
-                    "largestReinforcement:"  => stat.largest_reinforcement    = parts[1].parse().unwrap_or(0),
-                    "planetsLost:"           => stat.planets_lost             = parts[1].parse().unwrap_or(0),
-                    "planetsConquered:"      => stat.planets_conquered        = parts[1].parse().unwrap_or(0),
-                    "planetsDefended:"       => stat.planets_defended         = parts[1].parse().unwrap_or(0),
-                    "planetsAttacked:"       => stat.planets_attacked         = parts[1].parse().unwrap_or(0),
-                    "numFleetLost:"          => stat.num_fleet_lost            = parts[1].parse().unwrap_or(0),
-                    "numFleetReinforced:"    => stat.num_fleet_reinforced      = parts[1].parse().unwrap_or(0),
-                    "numFleetGenerated:"     => stat.num_fleet_generated       = parts[1].parse().unwrap_or(0),
-                    "totalTroopsGenerated:"  => stat.total_troops_generated    = parts[1].parse().unwrap_or(0),
-                    _ => ()
+                    "turnsPlayed:" => stat.turns_played = parts[1].parse().unwrap_or(0),
+                    "survive:" => stat.survived = parts[1].parse().unwrap_or(false),
+                    "fleetGenerated:" => stat.fleet_generated = parts[1].parse().unwrap_or(0),
+                    "fleetLost:" => stat.fleet_lost = parts[1].parse().unwrap_or(0),
+                    "fleetReinforced:" => stat.fleet_reinforced = parts[1].parse().unwrap_or(0),
+                    "largestAttack:" => stat.largest_attack = parts[1].parse().unwrap_or(0),
+                    "largestLoss:" => stat.largest_loss = parts[1].parse().unwrap_or(0),
+                    "largestReinforcement:" => {
+                        stat.largest_reinforcement = parts[1].parse().unwrap_or(0)
+                    }
+                    "planetsLost:" => stat.planets_lost = parts[1].parse().unwrap_or(0),
+                    "planetsConquered:" => stat.planets_conquered = parts[1].parse().unwrap_or(0),
+                    "planetsDefended:" => stat.planets_defended = parts[1].parse().unwrap_or(0),
+                    "planetsAttacked:" => stat.planets_attacked = parts[1].parse().unwrap_or(0),
+                    "numFleetLost:" => stat.num_fleet_lost = parts[1].parse().unwrap_or(0),
+                    "numFleetReinforced:" => {
+                        stat.num_fleet_reinforced = parts[1].parse().unwrap_or(0)
+                    }
+                    "numFleetGenerated:" => {
+                        stat.num_fleet_generated = parts[1].parse().unwrap_or(0)
+                    }
+                    "totalTroopsGenerated:" => {
+                        stat.total_troops_generated = parts[1].parse().unwrap_or(0)
+                    }
+                    _ => (),
                 }
             }
         }
@@ -586,14 +624,14 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
         &match_game.team1bot1_survived,
         &match_game.team1bot2_survived,
         &match_game.team2bot1_survived,
-        &match_game.team2bot2_survived
+        &match_game.team2bot2_survived,
     ) {
-        (true,  true,  false, false) => match_game.winner_id = match_game.team1_id.clone(),
-        (true,  false, false, false) => match_game.winner_id = match_game.team1_id.clone(),
-        (false, true,  false, false) => match_game.winner_id = match_game.team1_id.clone(),
-        (false, false, true,  true)  => match_game.winner_id = match_game.team2_id.clone(),
-        (false, false, true,  false) => match_game.winner_id = match_game.team2_id.clone(),
-        (false, false, false, true)  => match_game.winner_id = match_game.team2_id.clone(),
+        (true, true, false, false) => match_game.winner_id = match_game.team1_id.clone(),
+        (true, false, false, false) => match_game.winner_id = match_game.team1_id.clone(),
+        (false, true, false, false) => match_game.winner_id = match_game.team1_id.clone(),
+        (false, false, true, true) => match_game.winner_id = match_game.team2_id.clone(),
+        (false, false, true, false) => match_game.winner_id = match_game.team2_id.clone(),
+        (false, false, false, true) => match_game.winner_id = match_game.team2_id.clone(),
         (_, _, _, _) => match_game.winner_id = "".to_string(),
     }
 
@@ -601,7 +639,7 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
     if match_game.winner_id.eq("") {
         let t1_score = r_yellow + r_green;
         let t2_score = r_blue + r_cyan;
-        
+
         if t1_score > t2_score {
             match_game.winner_id = match_game.team1_id.clone();
         } else {
@@ -611,10 +649,10 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
     if stats.is_empty() && last_L.is_some() {
         parse_bugged_game(vec![], vec![last_L.unwrap()], match_game)
     } else {
-        match_game.additional_data = serde_json::to_string(&stats).unwrap_or(String::from("{ \"error\": \"Error serializing\"}"));
+        match_game.additional_data = serde_json::to_string(&stats)
+            .unwrap_or(String::from("{ \"error\": \"Error serializing\"}"));
     }
 }
-
 
 /// Attempts to compile the bots associated with each team in parallel.
 ///
@@ -638,47 +676,50 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
 ///
 pub fn compile_team_bots(teams: Vec<Team>) -> Vec<Team> {
     // Parallel processing of each team to compile associated bots
-    let results: Vec<Team> = teams.into_par_iter().filter_map(|team| {
-        // Skip teams without both bot1 and bot2
-        if team.bot1.eq("") || team.bot2.eq("") {
-            return None
-        }
-
-        // Retrieve bot details
-        let bot1 = match get_bot_by_id(team.bot1.clone()) {
-            Ok(b) => b,
-            Err(_) => return None,
-        };
-
-        let bot2 = match get_bot_by_id(team.bot2.clone()) {
-            Ok(b) => b,
-            // Err(e) => return Some(Err(MatchMakerError::DatabaseError(e))),
-            Err(_) => return None,
-        };
-        
-        // Attempt to compile bot1
-        if let Err(e) = compile_bot(&bot1) {
-            if let Err(_) = set_bot_error(bot1, e.to_string()) {
-                // return Some(Err(MatchMakerError::DatabaseError(e)));
+    let results: Vec<Team> = teams
+        .into_par_iter()
+        .filter_map(|team| {
+            // Skip teams without both bot1 and bot2
+            if team.bot1.eq("") || team.bot2.eq("") {
                 return None;
             }
-            // return Some(Err(e))
-            return None
-        }
 
-        // Attempt to compile bot2
-        if let Err(e) = compile_bot(&bot2) {
-            if let Err(_) = set_bot_error(bot2, e.to_string()) {
-                // return Some(Err(MatchMakerError::DatabaseError(e)));
+            // Retrieve bot details
+            let bot1 = match get_bot_by_id(team.bot1.clone()) {
+                Ok(b) => b,
+                Err(_) => return None,
+            };
+
+            let bot2 = match get_bot_by_id(team.bot2.clone()) {
+                Ok(b) => b,
+                // Err(e) => return Some(Err(MatchMakerError::DatabaseError(e))),
+                Err(_) => return None,
+            };
+
+            // Attempt to compile bot1
+            if let Err(e) = compile_bot(&bot1) {
+                if let Err(_) = set_bot_error(bot1, e.to_string()) {
+                    // return Some(Err(MatchMakerError::DatabaseError(e)));
+                    return None;
+                }
+                // return Some(Err(e))
                 return None;
             }
-            // return Some(Err(e))
-            return None
-        }
 
-        // Return the team if both bots compiled successfully
-        Some(team)
-    }).collect();
+            // Attempt to compile bot2
+            if let Err(e) = compile_bot(&bot2) {
+                if let Err(_) = set_bot_error(bot2, e.to_string()) {
+                    // return Some(Err(MatchMakerError::DatabaseError(e)));
+                    return None;
+                }
+                // return Some(Err(e))
+                return None;
+            }
+
+            // Return the team if both bots compiled successfully
+            Some(team)
+        })
+        .collect();
 
     results
     // // Extract teams with successful bot compilations
@@ -691,7 +732,6 @@ pub fn compile_team_bots(teams: Vec<Team>) -> Vec<Team> {
 
     // compiled_teams
 }
-
 
 /// Check if a file contains the string "public static void main("
 fn contains_main_method(file_path: &str) -> io::Result<bool> {
@@ -733,7 +773,7 @@ fn contains_main_method(file_path: &str) -> io::Result<bool> {
 /// * The ZIP file cannot be copied or unzipped.
 /// * No Java files are found in the unzipped directory.
 /// * The Java files cannot be compiled.
-/// 
+///
 pub fn compile_bot(bot: &Bot) -> Result<(), MatchMakerError> {
     let workdir = Path::new("./resources/workdir/bots").join(bot.id.clone());
     let source_path = Path::new(&bot.source_path);
@@ -754,11 +794,8 @@ pub fn compile_bot(bot: &Bot) -> Result<(), MatchMakerError> {
     };
 
     // Copy the bot's ZIP file to its working directory.
-    if let Err(e) = execute_command(
-        "cp".to_string(), 
-        vec![source_path_str, workdir_str]
-    ) {
-        return Err(MatchMakerError::IOError(e))
+    if let Err(e) = execute_command("cp".to_string(), vec![source_path_str, workdir_str]) {
+        return Err(MatchMakerError::IOError(e));
     };
 
     // Extract the file name from the source path.
@@ -766,7 +803,7 @@ pub fn compile_bot(bot: &Bot) -> Result<(), MatchMakerError> {
         Some(n) => n,
         None => return Err(MatchMakerError::InvalidPath(source_path.into())),
     };
-    
+
     let file_name_str = match file_name_osstr.to_str() {
         Some(s) => s,
         None => return Err(MatchMakerError::InvalidPath(source_path.into())),
@@ -778,10 +815,10 @@ pub fn compile_bot(bot: &Bot) -> Result<(), MatchMakerError> {
         Some(s) => s,
         None => return Err(MatchMakerError::InvalidPath(unzip_target.into())),
     };
-    
+
     if let Err(e) = execute_command(
-        "unzip".to_string(), 
-        vec!["-o", unzip_target_str, "-d", workdir_str]
+        "unzip".to_string(),
+        vec!["-o", unzip_target_str, "-d", workdir_str],
     ) {
         return Err(MatchMakerError::IOError(e));
     }
@@ -793,26 +830,30 @@ pub fn compile_bot(bot: &Bot) -> Result<(), MatchMakerError> {
             .filter(|entry| entry.path().extension() == Some(std::ffi::OsStr::new("java")))
             .map(|entry| entry.path().display().to_string())
             .collect(),
-        Err(e) => return Err(MatchMakerError::IOError(e))
+        Err(e) => return Err(MatchMakerError::IOError(e)),
     };
-    
+
     if java_files.is_empty() {
-        return Err(MatchMakerError::IOError(std::io::Error::new(std::io::ErrorKind::NotFound, "No Java files found")));
+        return Err(MatchMakerError::IOError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No Java files found",
+        )));
     }
 
     // Check if "Player.java" exists in the list of Java files
     if !java_files.iter().any(|file| file.ends_with("Player.java")) {
         return Err(MatchMakerError::PlayerFileMissing);
     }
-    
+
     // Convert the list of file paths to a format suitable for the `javac` command.
-    let java_files_str: Vec<&str> = java_files
-        .iter()
-        .map(AsRef::as_ref)
-        .collect();
+    let java_files_str: Vec<&str> = java_files.iter().map(AsRef::as_ref).collect();
 
     // Player.java path
-    let player_java_path = java_files.iter().find(|&file| file.contains("Player.java")).cloned().unwrap();
+    let player_java_path = java_files
+        .iter()
+        .find(|&file| file.contains("Player.java"))
+        .cloned()
+        .unwrap();
     let contains_main_method_option = contains_main_method(&player_java_path);
     if let Ok(has_main_function) = contains_main_method_option {
         if !has_main_function {
@@ -822,12 +863,8 @@ pub fn compile_bot(bot: &Bot) -> Result<(), MatchMakerError> {
         return Err(MatchMakerError::MainMethodNotInPlayerFile);
     }
 
-
     // Compile the Java files.
-    if let Err(e) = execute_command(
-        "javac".to_string(),
-        java_files_str
-    ) {
+    if let Err(e) = execute_command("javac".to_string(), java_files_str) {
         return Err(MatchMakerError::IOError(e));
     }
 
@@ -848,7 +885,7 @@ pub fn compile_bot(bot: &Bot) -> Result<(), MatchMakerError> {
 /// # Panics
 ///
 /// The function may panic if the random number generation fails.
-/// 
+///
 fn create_match_pairs(match_num: i32, teams: Vec<Team>) -> Vec<(Team, Team)> {
     let mut pairs = Vec::new();
     let games_to_play = ((teams.len() as f32 * match_num as f32) / 2.).ceil() as i32;
@@ -861,14 +898,14 @@ fn create_match_pairs(match_num: i32, teams: Vec<Team>) -> Vec<(Team, Team)> {
     while (pairs.len() as i32) < games_to_play {
         let random_index = rand::thread_rng().gen_range(0..players.len());
         let first_team_index = players.swap_remove(random_index);
-    
+
         if players.len() < 1 {
-            break
+            break;
         }
 
         let random_index = rand::thread_rng().gen_range(0..players.len());
         let second_team_index = players.swap_remove(random_index);
-    
+
         pairs.push((
             teams[first_team_index].clone(),
             teams[second_team_index].clone(),
