@@ -271,13 +271,7 @@ fn run_match(
     // Execute the game using the Evaluator JAR and collect the paths of each bot
     let mut bot_paths: Vec<String> = bots
         .iter()
-        .map(|bot_id| {
-            format!(
-                "-p_{} {}",
-                i,
-                match_folder.join(bot_id).to_string_lossy().to_string()
-            )
-        })
+        .map(|bot_id| match_folder.join(bot_id).to_string_lossy().to_string())
         .collect();
     let output_file = format!(
         "./resources/games/{}/{}.zip",
