@@ -478,6 +478,7 @@ fn parse_healthy_game(lines: Vec<String>, _errors: Vec<String>, match_game: &mut
     let mut r_yellow = 0;
     let mut r_cyan = 0;
     let mut current_bot: Option<String> = None;
+    #[allow(non_snake_case)]
     let mut last_L: Option<String> = None;
     let mut stats: HashMap<String, GamePlayerStats> = HashMap::new();
     let mut stats_keys = vec!["team2bot2", "team1bot2", "team2bot1", "team1bot1"];
