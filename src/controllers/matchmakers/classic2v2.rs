@@ -271,8 +271,7 @@ fn run_match(
     // Execute the game using the Evaluator JAR and collect the paths of each bot
     let mut bot_paths: Vec<String> = bots
         .iter()
-        .enumerate()
-        .map(|(i, bot_id)| {
+        .map(|bot_id| {
             format!(
                 "-p_{} {}",
                 i,
@@ -288,7 +287,7 @@ fn run_match(
     let mut command_args = vec![
         "-jar".to_string(),
         "resources/gamefiles/Evaluator.jar".to_string(),
-        "-o".to_string(), // run to stdout
+        "--gui=false".to_string(),
     ];
     command_args.append(&mut bot_paths);
 
