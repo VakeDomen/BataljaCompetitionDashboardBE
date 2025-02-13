@@ -271,7 +271,7 @@ fn parse_game(
         log::warn!("No lines found");
     }
 
-    for bot_str in vec!["team1bot1", "team1bot2", "team2bot1", "team2bot2"] {
+    for bot_str in vec!["team2bot2", "team2bot1", "team1bot2", "team1bot1"] {
         let bot_json = lines.pop().unwrap_or_else(|| {
             log::warn!("No {} JSON", bot_str);
             return "".to_owned();
