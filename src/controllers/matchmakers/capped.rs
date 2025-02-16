@@ -125,8 +125,10 @@ fn run_match(
         "resources/gamefiles/Capped.jar".to_string(),
         "--no-gui".to_string(),
         "-j".to_string(),
+        "-t".to_string(),
+        "200".to_string(),
         "-tn_0".to_string(),
-        team1.name.clone(),
+        format!(" {}",team1.name.clone()),
         "-tn_1".to_string(),
         team2.name.clone(),
     ];
